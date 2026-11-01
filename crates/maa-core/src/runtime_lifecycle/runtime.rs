@@ -85,6 +85,17 @@ impl Drop for RuntimeChange {
     }
 }
 
+/// Resolve a library path that has a directory part, since `SetDllDirectoryW` removes the
+/// current directory from the DLL search order. A bare file name is left to that search.
+#[cfg(target_os = "windows")]
+fn absolute_library_path(path: &Path) -> Result<std::path::PathBuf> {
+    if path.parent().is_none_or(|dir| dir.as_os_str().is_empty()) {
+        return Ok(path.to_path_buf());
+    }
+
+    Ok(std::path::absolute(path).map_err(windows_result::Error::from)?)
+}
+
 impl Assistant {
     /// Load the shared library of the MaaCore
     ///
@@ -95,17 +106,18 @@ impl Assistant {
         let runtime_change = RuntimeChange::begin()?;
 
         #[cfg(target_os = "windows")]
+        let path: &Path = &absolute_library_path(path)?;
+
+        #[cfg(target_os = "windows")]
         if let Some(dir) = path.parent() {
             use windows_strings::HSTRING;
             use windows_sys::Win32::System::LibraryLoader::SetDllDirectoryW;
 
-            if dir != Path::new(".") {
-                // Safety: HSTRING::as_ptr returns a valid, NUL-terminated wide
-                // string pointer that lives for the duration of this call.
-                let code = unsafe { SetDllDirectoryW(HSTRING::from(dir).as_ptr()) };
-                if code == 0 {
-                    windows_result::HRESULT::from_thread().ok()?;
-                }
+            // Safety: HSTRING::as_ptr returns a valid, NUL-terminated wide
+            // string pointer that lives for the duration of this call.
+            let code = unsafe { SetDllDirectoryW(HSTRING::from(dir).as_ptr()) };
+            if code == 0 {
+                windows_result::HRESULT::from_thread().ok()?;
             }
         }
 
@@ -342,6 +354,30 @@ pub(crate) mod tests {
         assert!(Assistant::load("/this/library/does_not_exist.so").is_err());
 
         assert_eq!(RUNTIME_STATE.load(Ordering::Acquire), RUNTIME_LOADED);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn library_path_with_directory_becomes_absolute() {
+        assert_eq!(
+            absolute_library_path(Path::new("data/lib/MaaCore.dll")).unwrap(),
+            std::env::current_dir()
+                .unwrap()
+                .join("data")
+                .join("lib")
+                .join("MaaCore.dll")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn library_path_without_directory_is_unchanged() {
+        for path in ["MaaCore.dll", ""] {
+            assert_eq!(
+                absolute_library_path(Path::new(path)).unwrap(),
+                Path::new(path)
+            );
+        }
     }
 
     #[test]
