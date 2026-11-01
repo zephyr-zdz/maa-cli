@@ -45,23 +45,25 @@ pub fn download(
         request = request.header("Range", format!("bytes={}-", resume_from));
     }
 
-    let mut resp = request
-        .call()
-        .with_desc("Failed to send download request")?;
+    let mut resp = request.call();
 
     // Check if server supports range requests when resuming
-    if resume_from > 0 && resp.status() != 206 {
-        // Server doesn't support range requests, start from the beginning
+    let restart = match &resp {
+        Ok(resp) => resp.status() != 206,
+        // The range is unsatisfiable, e.g. the partial file is already complete
+        Err(error) => matches!(error, ureq::Error::StatusCode(416)),
+    };
+    if resume_from > 0 && restart {
+        // Server can't serve the range, start from the beginning
         drop(resp);
         std::fs::remove_file(&partial_path).with_desc("Failed to remove partial file")?;
 
         // Restart download from the beginning
         resume_from = 0;
-        resp = client
-            .get(url)
-            .call()
-            .with_desc("Failed to send download request")?;
+        resp = client.get(url).call();
     }
+
+    let mut resp = resp.with_desc("Failed to send download request")?;
 
     // Now we know if we're resuming or starting fresh, open/create the file accordingly
     let mut file = if resume_from > 0 {
@@ -136,7 +138,65 @@ pub fn download(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::{
+        fs,
+        io::{BufRead, BufReader},
+        net::TcpListener,
+        thread,
+    };
+
+    use tempfile::tempdir;
+
     use super::*;
+
+    /// Serves each response to a single request and returns the raw requests.
+    fn serve(responses: Vec<Vec<u8>>) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request: Vec<_> = BufReader::new(&stream)
+                    .lines()
+                    .map(Result::unwrap)
+                    .take_while(|line| !line.is_empty())
+                    .collect();
+                stream.write_all(&response).unwrap();
+                requests.push(request.join("\n").to_ascii_lowercase());
+            }
+            requests
+        });
+        (format!("http://{address}/file"), handle)
+    }
+
+    #[test]
+    fn test_download_restarts_on_range_not_satisfiable() {
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("file.zip");
+        let partial = partial_path(&dest);
+        fs::write(&partial, "body").unwrap();
+        let (url, server) = serve(vec![
+            b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */4\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody".to_vec(),
+        ]);
+
+        download(
+            &ureq::Agent::new_with_defaults(),
+            &url,
+            &dest,
+            ProgressBar::hidden(),
+            (),
+        )
+        .unwrap();
+        let requests = server.join().unwrap();
+
+        assert!(requests[0].contains("range: bytes=4-"));
+        assert!(!requests[1].contains("range:"));
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "body");
+        assert!(!partial.exists());
+    }
 
     #[test]
     fn test_partial_path() {
