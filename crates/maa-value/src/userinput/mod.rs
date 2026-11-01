@@ -62,11 +62,14 @@ pub trait UserInput: Sized {
         writer.flush()?;
         let mut input = String::new();
         loop {
-            reader.read_line(&mut input)?;
+            let read = reader.read_line(&mut input)?;
             let trimmed = input.trim();
             if trimmed.is_empty() {
                 match self.default() {
                     Value(value) => break Ok(value),
+                    Original(_) if read == 0 => {
+                        break Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+                    }
                     Original(orig) => {
                         self = orig;
                         self.prompt_prefix_empty(writer)?;
@@ -295,6 +298,31 @@ mod tests {
                 "Please input number: Default value not set, please input number: ",
                 42,
             );
+        }
+
+        #[test]
+        fn eof_with_default_returns_default() {
+            assert_output(
+                Input::<i64>::new(Some(1)).with_description("number"),
+                "",
+                "Please input number [default: 1]: ",
+                1,
+            );
+        }
+
+        #[test]
+        fn eof_without_default_returns_error() {
+            let mut output = Vec::new();
+            let mut input = io::BufReader::new("".as_bytes());
+            let error = Input::<i64>::new(None)
+                .with_description("number")
+                .ask(&mut output, &mut input)
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                Error::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof
+            ));
+            assert_eq!(String::from_utf8(output).unwrap(), "Please input number: ");
         }
 
         #[test]
