@@ -13,9 +13,12 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use ureq::http::StatusCode;
 
 use super::{IntoParameters, TaskContext, ToTaskType};
-use crate::dirs::{self, Ensure};
 #[cfg(not(test))]
 use crate::state::AGENT;
+use crate::{
+    config::json_from_file,
+    dirs::{self, Ensure},
+};
 
 #[cfg(not(test))]
 const COPILOT_API: &str = "https://prts.maa.plus/copilot/get/";
@@ -580,10 +583,6 @@ impl CopilotFile {
             }
         }
     }
-}
-
-fn json_from_file<V: serde::de::DeserializeOwned>(path: impl AsRef<Path>) -> Result<V> {
-    Ok(serde_json::from_reader(fs::File::open(path)?)?)
 }
 
 fn operator_table(task: &CopilotTask) -> Result<Table> {

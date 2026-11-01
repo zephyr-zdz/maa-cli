@@ -17,6 +17,15 @@ fn file_not_found(path: impl AsRef<Path>) -> std::io::Error {
     )
 }
 
+pub(crate) fn json_from_file<T>(path: impl AsRef<Path>) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let bytes = fs::read(path)?;
+    let json = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    Ok(serde_json::from_slice(json)?)
+}
+
 const SUPPORTED_EXTENSION: [&str; 4] = ["json", "yaml", "yml", "toml"];
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -56,7 +65,7 @@ impl Filetype {
     {
         use Filetype::*;
         Ok(match self {
-            Json => serde_json::from_reader(File::open(path)?)?,
+            Json => json_from_file(path)?,
             Yaml => yaml_serde::from_reader(File::open(path)?)?,
             Toml => toml::from_str(&fs::read_to_string(path)?)?,
         })
@@ -227,6 +236,15 @@ mod tests {
             let test_toml = test_file.with_extension("toml");
             Toml.write(&test_toml, &value).unwrap();
             assert_eq!(MAAValue::from_file(&test_toml).unwrap(), value);
+        }
+
+        #[test]
+        fn read_json_with_bom() {
+            let dir = tempfile::tempdir().unwrap();
+            let test_json = dir.path().join("test.json");
+            fs::write(&test_json, b"\xEF\xBB\xBF{\"a\": 1}").unwrap();
+
+            assert_eq!(MAAValue::from_file(&test_json).unwrap(), object!("a" => 1));
         }
 
         #[test]
