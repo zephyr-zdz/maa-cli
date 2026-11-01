@@ -101,6 +101,7 @@ mod command {
     use std::{path::Path, process::Command};
 
     use anyhow::{Context, Result, bail};
+    use maa_dirs::expand_tilde;
 
     use super::StatusExt;
     use crate::config::cli::{resource::Certificate, secret::Secret};
@@ -109,7 +110,7 @@ mod command {
         matches!(passphrase, Secret::None | Secret::Prompt)
     }
 
-    fn setup_cert(cmd: &mut Command, cert: Option<&Certificate>) -> Result<()> {
+    pub fn setup_cert(cmd: &mut Command, cert: Option<&Certificate>) -> Result<()> {
         match cert {
             Some(Certificate::SshKey { path, passphrase }) => {
                 if !supports_git_auth_prompt(passphrase) {
@@ -120,10 +121,13 @@ mod command {
                     );
                 }
 
-                cmd.env(
-                    "GIT_SSH_COMMAND",
-                    format!("ssh -i {}", path.to_str().context("Invalid path")?),
-                );
+                // Git runs this through sh, and single quotes disable its tilde expansion
+                let path = expand_tilde(path);
+                let path = path
+                    .to_str()
+                    .context("Invalid path")?
+                    .replace('\'', "'\\''");
+                cmd.env("GIT_SSH_COMMAND", format!("ssh -i '{path}'"));
             }
             Some(Certificate::SshAgent) | None => {} // git uses ssh-agent by default
         }
@@ -276,6 +280,7 @@ mod tests {
     use std::{path::Path, process::Command};
 
     use super::*;
+    use crate::config::cli::secret::Secret;
 
     fn git_command(repo: &Path, args: &[&str]) {
         // Local fixture commands only; no global config, home files, or network.
@@ -290,6 +295,34 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn git_ssh_command(path: &str) -> String {
+        let mut cmd = Command::new("git");
+        let cert = Certificate::SshKey {
+            path: path.into(),
+            passphrase: Secret::None,
+        };
+        command::setup_cert(&mut cmd, Some(&cert)).unwrap();
+        let (_, value) = cmd
+            .get_envs()
+            .find(|(key, _)| *key == "GIT_SSH_COMMAND")
+            .unwrap();
+        value.unwrap().to_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn ssh_key_path_is_quoted_for_the_shell() {
+        assert_eq!(
+            git_ssh_command(r"C:\Users\A B\.ssh\id"),
+            r"ssh -i 'C:\Users\A B\.ssh\id'"
+        );
+        assert_eq!(git_ssh_command("/keys/it's"), r"ssh -i '/keys/it'\''s'");
+    }
+
+    #[test]
+    fn ssh_key_tilde_is_expanded_before_quoting() {
+        assert!(!git_ssh_command("~/.ssh/id").contains('~'));
     }
 
     #[test]
